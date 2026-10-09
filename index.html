@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校隊行政管理</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, "PingFang HK", "Microsoft JhengHei", sans-serif; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  @media print {
+    body * { visibility: hidden; }
+    #printArea, #printArea * { visibility: visible; }
+    #printArea { position: absolute; left: 0; top: 0; width: 100%; }
+    .print-hide { display: none !important; }
+  }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<!-- Header -->
+<header class="bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg print-hide">
+  <div class="max-w-5xl mx-auto px-4 py-4 flex items-center gap-3">
+    <div class="bg-white/20 p-2 rounded-xl text-2xl">🎵</div>
+    <div>
+      <h1 class="text-lg font-bold leading-tight">校隊行政管理</h1>
+      <p class="text-xs text-indigo-100">合唱團 · 手鐘隊 · 管樂隊</p>
+    </div>
+  </div>
+</header>
+
+<!-- Tabs -->
+<nav class="bg-white border-b sticky top-0 z-20 shadow-sm print-hide">
+  <div id="tabBar" class="max-w-5xl mx-auto px-2 flex overflow-x-auto no-scrollbar"></div>
+</nav>
+
+<main id="content" class="max-w-5xl mx-auto px-4 py-6"></main>
+
+<!-- Modal container -->
+<div id="modalRoot"></div>
+
+<!-- Toast -->
+<div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-5 py-3 rounded-full shadow-xl text-sm z-50 hidden items-center gap-2"></div>
+
+<script>
+/* ==================== 資料 ==================== */
+const TEAMS = [
+  { id: 'choir', name: '合唱團', color: 'bg-rose-500', light: 'bg-rose-100 text-rose-700', bar: '#f43f5e' },
+  { id: 'handbell', name: '手鐘隊', color: 'bg-amber-500', light: 'bg-amber-100 text-amber-700', bar: '#f59e0b' },
+  { id: 'band', name: '管樂隊', color: 'bg-sky-500', light: 'bg-sky-100 text-sky-700', bar: '#0ea5e9' },
+];
+const teamById = id => TEAMS.find(t => t.id === id);
+const teamName = id => teamById(id)?.name || id;
+
+let state = {
+  tab: 'students',
+  students: [],
+  attendance: [],
+  stuSearch: '', stuFilter: 'all', stuSelected: [],
+  bcTeam: 'choir', bcMessage: '', bcQueue: [], bcIdx: 0,
+  atTeam: 'choir', atDate: today(), atRecords: {},
+  stTeam: 'all', stDate: '',
+  shTeam: 'choir', shDate: '', shGenerated: null,
+  slipTeam: 'choir',
+  slipMsg: '{班別}{姓名}，今日放學有 4:10 練習，請到音樂室進行練習。\n如不能出席請小息到 108 教員室找老師，若無故缺席需要扣分。',
+  slipGenerated: null,
+};
+
+function today() { return new Date().toISOString().slice(0, 10); }
+
+/* ---- localStorage ---- */
+function saveData() {
+  try {
+    localStorage.setItem('team_students', JSON.stringify(state.students));
+    localStorage.setItem('team_attendance', JSON.stringify(state.attendance));
+  } catch (e) {}
+}
+function loadData() {
+  try {
+    const s = localStorage.getItem('team_students');
+    const a = localStorage.getItem('team_attendance');
+    if (s) state.students = JSON.parse(s);
+    if (a) state.attendance = JSON.parse(a);
+  } catch (e) {}
+  if (state.students.length === 0) {
+    state.students = [
+      { id: 1, name: '陳大文', cls: '5A', no: '12', phone: '91234567', teams: ['choir'], inWhatsapp: true, noticeSent: true, noticeReceived: false },
+      { id: 2, name: '李小明', cls: '4B', no: '08', phone: '92345678', teams: ['choir','handbell'], inWhatsapp: false, noticeSent: false, noticeReceived: false },
+      { id: 3, name: '黃美玲', cls: '6C', no: '21', phone: '93456789', teams: ['band'], inWhatsapp: true, noticeSent: true, noticeReceived: true },
+    ];
+  }
+  state.students.forEach(x => {
+    if (x.noticeSent === undefined) x.noticeSent = false;
+    if (x.noticeReceived === undefined) x.noticeReceived = false;
+  });
+}
+
+/* ==================== 工具 ==================== */
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.innerHTML = '<span style="color:#34d399">✓</span> ' + esc(msg);
+  t.classList.remove('hidden'); t.classList.add('flex');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.classList.add('hidden'); t.classList.remove('flex'); }, 2500);
+}
+function formatPhone(p) {
+  const clean = String(p).replace(/\D/g, '');
+  return clean.length === 8 ? '852' + clean : clean;
+}
+function sortStudents(list){
+  return [...list].sort((a,b)=>{
+    const c=String(a.cls||'').localeCompare(String(b.cls||''),'zh-Hant');
+    if(c!==0)return c;
+    return (parseInt(a.no)||0)-(parseInt(b.no)||0);
+  });
+}
+function fillTemplate(tpl, stu){
+  return String(tpl||'')
+    .replace(/\{班別\}/g, stu.cls || '')
+    .replace(/\{學號\}/g, stu.no || '')
+    .replace(/\{姓名\}/g, stu.name || '');
+}
+/* ---- 匯出 Word (.doc) ---- */
+function exportWord(innerHTML, filename){
+  const source = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>@page{margin:1.5cm;} body{font-family:"PingFang HK","Microsoft JhengHei","新細明體",sans-serif;}</style></head><body>' + innerHTML + '</body></html>';
+  const blob = new Blob(['\ufeff', source], { type: 'application/msword' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+/* ==================== Tabs ==================== */
+const TABS = [
+  { id: 'students', name: '學生管理', icon: '👥' },
+  { id: 'broadcast', name: '廣播訊息', icon: '📤' },
+  { id: 'attendance', name: '點名管理', icon: '✅' },
+  { id: 'stats', name: '出席統計', icon: '📊' },
+  { id: 'sheet', name: '點名表生成', icon: '📄' },
+  { id: 'slip', name: '印提示紙', icon: '📋' },
+];
+function renderTabs() {
+  document.getElementById('tabBar').innerHTML = TABS.map(t => {
+    const active = state.tab === t.id;
+    return `<button onclick="setTab('${t.id}')" class="flex items-center gap-1.5 px-3 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${active ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}"><span>${t.icon}</span>${t.name}</button>`;
+  }).join('');
+}
+function setTab(id) { state.tab = id; render(); }
+
+/* ==================== 主渲染 ==================== */
+function render() {
+  renderTabs();
+  const c = document.getElementById('content');
+  if (state.tab === 'students') c.innerHTML = renderStudents();
+  else if (state.tab === 'broadcast') c.innerHTML = renderBroadcast();
+  else if (state.tab === 'attendance') c.innerHTML = renderAttendance();
+  else if (state.tab === 'stats') c.innerHTML = renderStats();
+  else if (state.tab === 'sheet') c.innerHTML = renderSheet();
+  else if (state.tab === 'slip') c.innerHTML = renderSlips();
+}
+
+/* ==================== 學生管理 ==================== */
+function renderStudents() {
+  const s = state;
+  const filtered = s.students.filter(x => {
+    const inTeam = s.stuFilter === 'all' || x.teams.includes(s.stuFilter);
+    const ms = !s.stuSearch || x.name.includes(s.stuSearch) || x.cls.includes(s.stuSearch) || x.no.includes(s.stuSearch);
+    return inTeam && ms;
+  });
+  const chips = [`<button onclick="stuSetFilter('all')" class="text-sm px-3 py-1.5 rounded-full border ${s.stuFilter==='all'?'bg-indigo-600 text-white border-transparent':'border-slate-300 text-slate-600'}">全部 (${s.students.length})</button>`]
+    .concat(TEAMS.map(t => `<button onclick="stuSetFilter('${t.id}')" class="text-sm px-3 py-1.5 rounded-full border ${s.stuFilter===t.id?'bg-indigo-600 text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name} (${s.students.filter(x=>x.teams.includes(t.id)).length})</button>`)).join('');
+
+  const rows = filtered.length === 0 ? '<p class="text-center text-slate-400 py-10 text-sm">沒有符合的同學</p>' :
+    filtered.map(x => `
+      <div class="flex items-center gap-3 px-4 py-3 border-b last:border-0 hover:bg-slate-50">
+        <input type="checkbox" ${s.stuSelected.includes(x.id)?'checked':''} onchange="stuToggleSelect(${x.id})" class="w-4 h-4 rounded accent-indigo-600">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-medium">${esc(x.name)}</span>
+            ${x.teams.map(tid => { const t=teamById(tid); return `<span class="text-xs px-1.5 py-0.5 rounded ${t.light}">${t.name}</span>`; }).join('')}
+          </div>
+          <div class="text-xs text-slate-500 mt-0.5">${esc(x.cls)} · 學號 ${esc(x.no)}<span class="sm:hidden"> · ${esc(x.phone)}</span></div>
+          <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+            <button onclick="stuToggleNotice(${x.id},'noticeSent')" class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${x.noticeSent?'bg-blue-100 text-blue-700':'bg-slate-100 text-slate-400'}">📨 ${x.noticeSent?'已發通告':'未發通告'}</button>
+            <button onclick="stuToggleNotice(${x.id},'noticeReceived')" class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${x.noticeReceived?'bg-teal-100 text-teal-700':'bg-slate-100 text-slate-400'}">📥 ${x.noticeReceived?'已收通告':'未收通告'}</button>
+          </div>
+        </div>
+        <div class="flex flex-col items-end gap-1">
+          <span class="hidden sm:flex items-center gap-1 text-sm text-slate-600">📞 ${esc(x.phone)}</span>
+          <div class="flex items-center gap-1">
+            <button onclick="stuToggleWA(${x.id})" class="flex items-center gap-1 text-xs px-2 py-1 rounded-full ${x.inWhatsapp?'bg-emerald-100 text-emerald-700':'bg-slate-100 text-slate-400'}">💬 ${x.inWhatsapp?'已入群':'未入群'}</button>
+            <button onclick="stuEdit(${x.id})" class="text-xs text-slate-400 hover:text-indigo-600 px-1">✏️</button>
+          </div>
+        </div>
+      </div>`).join('');
+
+  const bulk = s.stuSelected.length > 0 ? `
+    <div class="flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-2 flex-wrap gap-2">
+      <span class="text-sm text-indigo-700 font-medium">已勾選 ${s.stuSelected.length} 位</span>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button onclick="stuBulkNotice('noticeSent')" class="text-xs px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 font-medium">標記已發通告</button>
+        <button onclick="stuBulkNotice('noticeReceived')" class="text-xs px-2.5 py-1 rounded-lg bg-teal-100 text-teal-700 font-medium">標記已收通告</button>
+        <button onclick="stuDeleteSelected()" class="flex items-center gap-1.5 text-red-600 text-sm font-medium">🗑️ 刪除</button>
+      </div>
+    </div>` : '';
+
+  const scope = s.stuFilter==='all' ? s.students : s.students.filter(x=>x.teams.includes(s.stuFilter));
+  const sentN = scope.filter(x=>x.noticeSent).length;
+  const recvN = scope.filter(x=>x.noticeReceived).length;
+  const overview = scope.length>0 ? `
+    <div class="grid grid-cols-2 gap-2">
+      <div class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-center"><div class="text-xs text-blue-600">📨 已發通告</div><div class="text-lg font-bold text-blue-700">${sentN} / ${scope.length}</div></div>
+      <div class="bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 text-center"><div class="text-xs text-teal-600">📥 已收通告</div><div class="text-lg font-bold text-teal-700">${recvN} / ${scope.length}</div></div>
+    </div>` : '';
+
+  return `
+    <div class="space-y-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="relative flex-1 min-w-40">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+          <input value="${esc(s.stuSearch)}" oninput="stuSearch(this.value)" placeholder="搜尋姓名 / 班別 / 學號" class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400">
+        </div>
+        <button onclick="stuOpenForm()" class="flex items-center gap-1.5 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium">➕ 新增同學</button>
+      </div>
+      <div class="flex flex-wrap gap-2">${chips}</div>
+      ${overview}
+      ${bulk}
+      <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div class="flex items-center gap-3 px-4 py-2.5 bg-slate-50 border-b text-xs font-semibold text-slate-500">
+          <input type="checkbox" ${filtered.length>0 && s.stuSelected.length===filtered.length?'checked':''} onchange="stuToggleAll()" class="w-4 h-4 rounded accent-indigo-600">
+          <span class="flex-1">姓名 / 班別 · 學號 / 通告狀態</span>
+          <span class="hidden sm:block">電話 / 狀態</span>
+        </div>
+        ${rows}
+      </div>
+    </div>`;
+}
+function stuSearch(v){ state.stuSearch=v; render(); requestAnimationFrame(()=>{const i=document.querySelector('#content input[placeholder]');if(i){i.focus();i.setSelectionRange(v.length,v.length);}}); }
+function stuSetFilter(f){ state.stuFilter=f; render(); }
+function stuToggleSelect(id){ const i=state.stuSelected.indexOf(id); if(i>=0)state.stuSelected.splice(i,1); else state.stuSelected.push(id); render(); }
+function stuToggleAll(){
+  const filtered = state.students.filter(x=>(state.stuFilter==='all'||x.teams.includes(state.stuFilter))&&(!state.stuSearch||x.name.includes(state.stuSearch)||x.cls.includes(state.stuSearch)||x.no.includes(state.stuSearch)));
+  if(state.stuSelected.length===filtered.length) state.stuSelected=[]; else state.stuSelected=filtered.map(x=>x.id);
+  render();
+}
+function stuToggleWA(id){ const x=state.students.find(s=>s.id===id); x.inWhatsapp=!x.inWhatsapp; saveData(); render(); }
+function stuToggleNotice(id,field){ const x=state.students.find(s=>s.id===id); x[field]=!x[field]; saveData(); render(); }
+function stuBulkNotice(field){
+  state.students.forEach(x=>{ if(state.stuSelected.includes(x.id)) x[field]=true; });
+  showToast(`已標記 ${state.stuSelected.length} 位`); saveData(); render();
+}
+function stuDeleteSelected(){
+  const n=state.stuSelected.length;
+  state.students=state.students.filter(x=>!state.stuSelected.includes(x.id));
+  showToast(`已刪除 ${n} 位同學`); state.stuSelected=[]; saveData(); render();
+}
+
+/* ---- 新增/編輯表單 ---- */
+let formData = {};
+function stuOpenForm(edit){
+  formData = edit ? {...edit, teams:[...edit.teams]} : { name:'',cls:'',no:'',phone:'',teams:[],inWhatsapp:false,noticeSent:false,noticeReceived:false };
+  openModal(edit ? '編輯同學' : '新增同學', formHTML());
+}
+function stuEdit(id){ stuOpenForm(state.students.find(s=>s.id===id)); }
+function formHTML(){
+  const f=formData;
+  return `
+    <div class="space-y-3">
+      <div><label class="text-sm font-medium text-slate-600 block mb-1">姓名</label>
+        <input id="f_name" value="${esc(f.name)}" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="text-sm font-medium text-slate-600 block mb-1">班別</label>
+          <input id="f_cls" value="${esc(f.cls)}" placeholder="例 5A" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400"></div>
+        <div><label class="text-sm font-medium text-slate-600 block mb-1">學號</label>
+          <input id="f_no" value="${esc(f.no)}" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400"></div>
+      </div>
+      <div><label class="text-sm font-medium text-slate-600 block mb-1">電話</label>
+        <input id="f_phone" value="${esc(f.phone)}" placeholder="例 91234567" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400"></div>
+      <div><label class="text-sm font-medium text-slate-600 block mb-1.5">所屬校隊（可多選）</label>
+        <div class="flex flex-wrap gap-2" id="f_teams">
+          ${TEAMS.map(t=>`<button type="button" onclick="formToggleTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-lg border ${f.teams.includes(t.id)?t.color+' text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name}</button>`).join('')}
+        </div>
+      </div>
+      <div class="space-y-2 pt-1 border-t">
+        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+          <input id="f_wa" type="checkbox" ${f.inWhatsapp?'checked':''} class="w-4 h-4 rounded accent-indigo-600"> 💬 已加入 WhatsApp Group
+        </label>
+        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+          <input id="f_sent" type="checkbox" ${f.noticeSent?'checked':''} class="w-4 h-4 rounded accent-blue-600"> 📨 已發通告
+        </label>
+        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+          <input id="f_recv" type="checkbox" ${f.noticeReceived?'checked':''} class="w-4 h-4 rounded accent-teal-600"> 📥 已收通告
+        </label>
+      </div>
+      <button onclick="stuSave()" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-medium mt-2">儲存</button>
+    </div>`;
+}
+function syncForm(){
+  formData.name=document.getElementById('f_name').value;
+  formData.cls=document.getElementById('f_cls').value;
+  formData.no=document.getElementById('f_no').value;
+  formData.phone=document.getElementById('f_phone').value;
+  formData.inWhatsapp=document.getElementById('f_wa').checked;
+  formData.noticeSent=document.getElementById('f_sent').checked;
+  formData.noticeReceived=document.getElementById('f_recv').checked;
+}
+function formToggleTeam(id){
+  syncForm();
+  const i=formData.teams.indexOf(id); if(i>=0)formData.teams.splice(i,1); else formData.teams.push(id);
+  document.getElementById('modalBody').innerHTML=formHTML();
+}
+function stuSave(){
+  syncForm();
+  if(!formData.name.trim()){ showToast('請輸入姓名'); return; }
+  if(formData.teams.length===0){ showToast('請選擇至少一個校隊'); return; }
+  if(formData.id){
+    const idx=state.students.findIndex(s=>s.id===formData.id);
+    state.students[idx]={...formData};
+  } else {
+    state.students.push({...formData, id:Date.now()});
+  }
+  saveData(); closeModal(); showToast('已儲存'); render();
+}
+
+/* ==================== 廣播 ==================== */
+function renderBroadcast() {
+  const s=state;
+  const recips = s.students.filter(x=>x.teams.includes(s.bcTeam)&&x.phone);
+  const teamBtns = TEAMS.map(t=>`<button onclick="bcSetTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-lg border ${s.bcTeam===t.id?t.color+' text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name} (${s.students.filter(x=>x.teams.includes(t.id)&&x.phone).length})</button>`).join('');
+
+  let queueBox='';
+  if(s.bcQueue.length>0){
+    const items=s.bcQueue.map((x,i)=>`
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${i===s.bcIdx?'bg-indigo-50 border border-indigo-200':i<s.bcIdx?'text-slate-400':''}">
+        ${i<s.bcIdx?'<span class="text-emerald-500">✓</span>':`<span class="w-4 text-center text-xs text-slate-400">${i+1}</span>`}
+        <span class="flex-1">${esc(x.name)}</span><span class="text-xs text-slate-400">${esc(x.phone)}</span>
+      </div>`).join('');
+    const cur=s.bcQueue[s.bcIdx];
+    queueBox=`
+      <div class="bg-white rounded-xl shadow-sm border p-4">
+        <div class="flex items-center justify-between mb-3"><h3 class="font-semibold text-sm">廣播發送序列</h3><span class="text-xs text-slate-500">${s.bcIdx+1} / ${s.bcQueue.length}</span></div>
+        <div class="w-full bg-slate-100 rounded-full h-2 mb-4"><div class="bg-indigo-600 h-2 rounded-full transition-all" style="width:${((s.bcIdx+1)/s.bcQueue.length)*100}%"></div></div>
+        <div class="space-y-1.5 max-h-52 overflow-y-auto mb-3">${items}</div>
+        <button onclick="bcSendCurrent()" class="w-full flex items-center justify-center gap-1.5 bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium">💬 發送給 ${esc(cur.name)}（${s.bcIdx<s.bcQueue.length-1?'下一位':'最後一位'}）</button>
+      </div>`;
+  }
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-xs text-amber-800">⚠️ 廣播會透過 WhatsApp 連結逐一開啟對話。請確保瀏覽器允許彈出新視窗。號碼會自動當作香港 8 位數字加上 852 區號。</div>
+      <div class="bg-white rounded-xl shadow-sm border p-4 space-y-4">
+        <div><label class="text-sm font-medium text-slate-600 block mb-1.5">選擇校隊</label><div class="flex flex-wrap gap-2">${teamBtns}</div></div>
+        <div><label class="text-sm font-medium text-slate-600 block mb-1.5">訊息內容</label>
+          <textarea id="bc_msg" oninput="state.bcMessage=this.value" rows="4" placeholder="輸入要廣播給同學的訊息…" class="w-full p-3 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400 resize-none">${esc(s.bcMessage)}</textarea></div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="bcStart()" class="flex items-center gap-1.5 bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium">📤 開始廣播序列</button>
+          <button onclick="bcSendAll()" class="flex items-center gap-1.5 bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium">📤 一鍵發送所有同學</button>
+        </div>
+      </div>
+      ${queueBox}
+    </div>`;
+}
+function bcSetTeam(id){ state.bcTeam=id; state.bcQueue=[]; render(); }
+function bcRecipients(){ return state.students.filter(x=>x.teams.includes(state.bcTeam)&&x.phone); }
+function bcStart(){
+  if(!state.bcMessage.trim()){ showToast('請輸入訊息內容'); return; }
+  const r=bcRecipients();
+  if(r.length===0){ showToast('此校隊沒有可發送的同學'); return; }
+  state.bcQueue=r; state.bcIdx=0; render();
+}
+function bcSendCurrent(){
+  const cur=state.bcQueue[state.bcIdx];
+  window.open(`https://wa.me/${formatPhone(cur.phone)}?text=${encodeURIComponent(state.bcMessage)}`,'_blank');
+  if(state.bcIdx<state.bcQueue.length-1){ state.bcIdx++; } else { showToast('已完成廣播序列'); }
+  render();
+}
+function bcSendAll(){
+  if(!state.bcMessage.trim()){ showToast('請輸入訊息內容'); return; }
+  const r=bcRecipients();
+  if(r.length===0){ showToast('此校隊沒有可發送的同學'); return; }
+  r.forEach((x,i)=>setTimeout(()=>window.open(`https://wa.me/${formatPhone(x.phone)}?text=${encodeURIComponent(state.bcMessage)}`,'_blank'), i*600));
+  showToast(`正在開啟 ${r.length} 個對話`);
+}
+
+/* ==================== 點名管理 ==================== */
+function renderAttendance() {
+  const s=state;
+  const list=sortStudents(s.students.filter(x=>x.teams.includes(s.atTeam)));
+  const teamBtns=TEAMS.map(t=>`<button onclick="atSetTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-lg border ${s.atTeam===t.id?t.color+' text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name}</button>`).join('');
+  const present=list.filter(x=>s.atRecords[x.id]==='present').length;
+
+  const rows = list.length===0 ? '<p class="text-center text-slate-400 py-6 text-sm">此校隊未有同學</p>' :
+    list.map(x=>`
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg border">
+        <div class="flex-1"><span class="text-xs text-slate-400 mr-2">${esc(x.cls)} · ${esc(x.no)}</span><span class="font-medium text-sm">${esc(x.name)}</span></div>
+        <button onclick="atSet(${x.id},'present')" class="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg font-medium ${s.atRecords[x.id]==='present'?'bg-emerald-500 text-white':'bg-slate-100 text-slate-500'}">✓ 出席</button>
+        <button onclick="atSet(${x.id},'absent')" class="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg font-medium ${s.atRecords[x.id]==='absent'?'bg-red-500 text-white':'bg-slate-100 text-slate-500'}">✕ 缺席</button>
+      </div>`).join('');
+
+  const history=s.attendance.filter(a=>a.team===s.atTeam).sort((a,b)=>b.date.localeCompare(a.date));
+  const histRows=history.length===0?'<p class="text-center text-slate-400 py-6 text-sm">尚無記錄</p>':
+    history.map(a=>{
+      const p=Object.values(a.records).filter(v=>v==='present').length, tot=Object.keys(a.records).length;
+      return `<div class="flex items-center justify-between px-3 py-2.5 rounded-lg bg-slate-50"><span class="text-sm font-medium">${a.date}</span><span class="text-xs text-slate-500">出席 <span class="text-emerald-600 font-semibold">${p}</span> / ${tot}</span></div>`;
+    }).join('');
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-xl shadow-sm border p-4 space-y-4">
+        <div class="flex flex-wrap gap-2">${teamBtns}</div>
+        <div class="flex items-center gap-2">📅 <input type="date" value="${s.atDate}" onchange="state.atDate=this.value" class="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400"></div>
+        <div class="flex items-center justify-between">
+          <span class="text-sm text-slate-500">出席 ${present} / ${list.length}</span>
+          <div class="flex gap-2">
+            <button onclick="atMarkAll('present')" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 font-medium">全部出席</button>
+            <button onclick="atMarkAll('absent')" class="text-xs px-3 py-1.5 rounded-lg bg-red-100 text-red-700 font-medium">全部缺席</button>
+          </div>
+        </div>
+        <div class="space-y-1.5">${rows}</div>
+        ${list.length>0?'<button onclick="atSave()" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-medium flex items-center justify-center gap-1.5">✅ 儲存點名</button>':''}
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border p-4">
+        <h3 class="font-semibold text-sm mb-3">📄 ${teamName(s.atTeam)}過往出席記錄</h3>
+        <div class="space-y-2">${histRows}</div>
+      </div>
+    </div>`;
+}
+function atSetTeam(id){ state.atTeam=id; state.atRecords={}; render(); }
+function atSet(id,st){ state.atRecords[id]=st; render(); }
+function atMarkAll(st){ state.students.filter(x=>x.teams.includes(state.atTeam)).forEach(x=>state.atRecords[x.id]=st); render(); }
+function atSave(){
+  if(!state.atDate){ showToast('請選擇日期'); return; }
+  const list=state.students.filter(x=>x.teams.includes(state.atTeam));
+  if(list.length===0){ showToast('此校隊沒有同學'); return; }
+  const full={}; list.forEach(x=>full[x.id]=state.atRecords[x.id]||'absent');
+  state.attendance=[{id:Date.now(),date:state.atDate,team:state.atTeam,records:full}].concat(state.attendance.filter(a=>!(a.date===state.atDate&&a.team===state.atTeam)));
+  showToast('已儲存點名記錄'); state.atRecords={}; saveData(); render();
+}
+
+/* ==================== 出席統計 ==================== */
+function renderStats() {
+  const s=state;
+  const filtered=s.attendance.filter(a=>(s.stTeam==='all'||a.team===s.stTeam)&&(!s.stDate||a.date===s.stDate)).sort((a,b)=>b.date.localeCompare(a.date));
+  const find=id=>s.students.find(x=>x.id==id);
+
+  const chips=[`<button onclick="stSetTeam('all')" class="text-sm px-3 py-1.5 rounded-full border ${s.stTeam==='all'?'bg-indigo-600 text-white border-transparent':'border-slate-300 text-slate-600'}">全部校隊</button>`]
+    .concat(TEAMS.map(t=>`<button onclick="stSetTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-full border ${s.stTeam===t.id?'bg-indigo-600 text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name}</button>`)).join('');
+
+  const detail=filtered.length===0?'<p class="text-center text-slate-400 py-6 text-sm">沒有符合的記錄</p>':
+    filtered.map(a=>{
+      const pl=Object.entries(a.records).filter(([,v])=>v==='present').map(([id])=>find(id)?.name).filter(Boolean);
+      const al=Object.entries(a.records).filter(([,v])=>v==='absent').map(([id])=>find(id)?.name).filter(Boolean);
+      return `<div class="border rounded-lg p-3">
+        <div class="flex items-center justify-between mb-2"><div class="flex items-center gap-2"><span class="font-semibold text-sm">${a.date}</span><span class="text-xs px-1.5 py-0.5 rounded ${teamById(a.team).light}">${teamName(a.team)}</span></div><span class="text-xs text-emerald-600 font-medium">${pl.length} 出席</span></div>
+        ${pl.length?`<p class="text-xs text-slate-600 mb-1">✓ 出席：${esc(pl.join('、'))}</p>`:''}
+        ${al.length?`<p class="text-xs text-slate-500">✕ 缺席：${esc(al.join('、'))}</p>`:''}
+      </div>`;
+    }).join('');
+
+  const map={};
+  s.attendance.filter(a=>s.stTeam==='all'||a.team===s.stTeam).forEach(a=>{
+    Object.entries(a.records).forEach(([id,st])=>{ if(!map[id])map[id]={p:0,t:0}; map[id].t++; if(st==='present')map[id].p++; });
+  });
+  const summary=Object.keys(map).length===0?'<p class="text-center text-slate-400 py-6 text-sm">尚無統計</p>':
+    Object.entries(map).map(([id,d])=>{
+      const stu=find(id); if(!stu)return '';
+      const rate=Math.round(d.p/d.t*100);
+      const color=rate>=80?'#10b981':rate>=50?'#f59e0b':'#ef4444';
+      return `<div class="flex items-center gap-3"><span class="text-sm w-20 truncate">${esc(stu.name)}</span><div class="flex-1 bg-slate-100 rounded-full h-2.5"><div class="h-2.5 rounded-full" style="width:${rate}%;background:${color}"></div></div><span class="text-xs text-slate-500 w-24 text-right">${d.p}/${d.t} (${rate}%)</span></div>`;
+    }).join('');
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-xl shadow-sm border p-4 space-y-3">
+        <h3 class="font-semibold text-sm">🔽 篩選器</h3>
+        <div class="flex flex-wrap gap-2">${chips}</div>
+        <div class="flex items-center gap-2">📅 <input type="date" value="${s.stDate}" onchange="stSetDate(this.value)" class="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400">${s.stDate?'<button onclick="stSetDate(\'\')" class="text-xs text-slate-500 underline">清除日期</button>':''}</div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border p-4"><h3 class="font-semibold text-sm mb-3">出席記錄詳情</h3><div class="space-y-3">${detail}</div></div>
+      <div class="bg-white rounded-xl shadow-sm border p-4"><h3 class="font-semibold text-sm mb-3">歷年出席統計（每位同學）</h3><div class="space-y-2">${summary}</div></div>
+    </div>`;
+}
+function stSetTeam(id){ state.stTeam=id; render(); }
+function stSetDate(v){ state.stDate=v; render(); }
+
+/* ==================== 點名表生成 ==================== */
+function parseDates(raw){
+  return String(raw||'').split(/[,、\n;；]+/).map(d=>d.trim()).filter(Boolean);
+}
+function renderSheet() {
+  const s=state;
+  const teamBtns=TEAMS.map(t=>`<button onclick="shSetTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-lg border ${s.shTeam===t.id?t.color+' text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name} (${s.students.filter(x=>x.teams.includes(t.id)).length})</button>`).join('');
+  const previewDates=parseDates(s.shDate);
+
+  let sheet='';
+  if(s.shGenerated){
+    const g=s.shGenerated;
+    const dates=g.dates.length?g.dates:['____________'];
+    const dateHeaders=dates.map(d=>`<th class="border border-slate-400 py-1.5 px-2 w-16">${esc(d)}</th>`).join('');
+    const dateCells=dates.map(()=>`<td class="border border-slate-400 py-2 px-2 text-center">☐</td>`).join('');
+
+    const body=g.list.length===0?`<tr><td colspan="${4+dates.length}" class="border border-slate-400 py-6 text-center text-slate-400">此校隊未有同學</td></tr>`:
+      g.list.map((x,i)=>`<tr><td class="border border-slate-400 py-2 px-2 text-center">${i+1}</td><td class="border border-slate-400 py-2 px-2 text-center">${esc(x.cls)}</td><td class="border border-slate-400 py-2 px-2 text-center">${esc(x.no)}</td><td class="border border-slate-400 py-2 px-2 whitespace-nowrap">${esc(x.name)}</td>${dateCells}<td class="border border-slate-400 py-2 px-2"></td></tr>`).join('');
+
+    sheet=`
+      <div class="bg-white rounded-xl shadow-sm border p-5">
+        <div class="flex items-center justify-between mb-4 print-hide"><span class="text-sm text-slate-500">預覽（共 ${dates.length} 個點名日期 · 已按班別／學號排序）</span><button onclick="window.print()" class="flex items-center gap-1.5 text-sm text-indigo-600 font-medium">⬇️ 列印 / 儲存 PDF</button></div>
+        <div id="printArea" class="overflow-x-auto">
+          <div class="border-2 border-slate-800 p-4 rounded min-w-full inline-block">
+            <h2 class="text-center text-lg font-bold mb-3">${teamName(g.team)} 課堂排練點名表</h2>
+            <table class="w-full border-collapse text-sm">
+              <thead><tr class="bg-slate-100">
+                <th class="border border-slate-400 py-1.5 px-2 w-10">#</th><th class="border border-slate-400 py-1.5 px-2 w-16">班別</th><th class="border border-slate-400 py-1.5 px-2 w-14">學號</th><th class="border border-slate-400 py-1.5 px-2">姓名</th>${dateHeaders}<th class="border border-slate-400 py-1.5 px-2 w-24">備註</th>
+              </tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+            <p class="text-xs text-slate-500 mt-3">總人數：${g.list.length} 人　　導師簽名：____________</p>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  const chipsPreview = previewDates.length ? `<div class="flex flex-wrap gap-1.5 mt-2">${previewDates.map(d=>`<span class="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${esc(d)}</span>`).join('')}</div>` : '';
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-xl shadow-sm border p-4 space-y-4 print-hide">
+        <div><label class="text-sm font-medium text-slate-600 block mb-1.5">選擇校隊</label><div class="flex flex-wrap gap-2">${teamBtns}</div></div>
+        <div>
+          <label class="text-sm font-medium text-slate-600 block mb-1">排練日期（可輸入多個，每個會成為一欄）</label>
+          <input value="${esc(s.shDate)}" oninput="shSetDate(this.value)" placeholder="例 12/6, 18/6, 25/6" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400">
+          <p class="text-xs text-slate-400 mt-1">用逗號、頓號或換行分隔多個日期</p>
+          ${chipsPreview}
+        </div>
+        <button onclick="shGenerate()" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-medium flex items-center justify-center gap-1.5">📄 生成點名表</button>
+      </div>
+      ${sheet}
+    </div>`;
+}
+function shSetTeam(id){ state.shTeam=id; render(); }
+function shSetDate(v){ state.shDate=v; }
+function shGenerate(){ state.shGenerated={team:state.shTeam,dates:parseDates(state.shDate),list:sortStudents(state.students.filter(x=>x.teams.includes(state.shTeam)))}; render(); }
+
+/* ==================== 印提示紙 ==================== */
+function slipTableHTML(g){
+  const rows = g.list.length===0
+    ? '<tr><td style="border:1px solid #000;padding:14px;text-align:center;color:#999;">此校隊未有同學</td></tr>'
+    : g.list.map(x=>{
+        const msg = esc(fillTemplate(g.msg, x)).replace(/\n/g,'<br>');
+        return `<tr><td style="border:1px solid #000;padding:12px 16px;font-size:15px;line-height:2;font-family:'PingFang HK','Microsoft JhengHei','新細明體',sans-serif;">${msg}</td></tr>`;
+      }).join('');
+  return `<table style="border-collapse:collapse;width:100%;table-layout:fixed;">${rows}</table>`;
+}
+function renderSlips() {
+  const s=state;
+  const teamBtns=TEAMS.map(t=>`<button onclick="slipSetTeam('${t.id}')" class="text-sm px-3 py-1.5 rounded-lg border ${s.slipTeam===t.id?t.color+' text-white border-transparent':'border-slate-300 text-slate-600'}">${t.name} (${s.students.filter(x=>x.teams.includes(t.id)).length})</button>`).join('');
+
+  let preview='';
+  if(s.slipGenerated){
+    const g=s.slipGenerated;
+    const slips = g.list.length===0
+      ? '<p class="text-center text-slate-400 py-6 text-sm">此校隊未有同學</p>'
+      : g.list.map(x=>{
+          const msg=esc(fillTemplate(g.msg,x)).replace(/\n/g,'<br>');
+          return `<div class="border border-slate-800 px-4 py-3 text-sm leading-loose -mt-px first:mt-0">${msg}</div>`;
+        }).join('');
+    preview=`
+      <div class="bg-white rounded-xl shadow-sm border p-5">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <span class="text-sm text-slate-500">預覽 ${teamName(g.team)}（共 ${g.list.length} 張 · 已按班別／學號排序）</span>
+          <div class="flex gap-2">
+            <button onclick="slipExport()" class="flex items-center gap-1.5 text-sm bg-blue-600 text-white px-3 py-1.5 rounded-lg font-medium">⬇️ 匯出 Word</button>
+            <button onclick="window.print()" class="flex items-center gap-1.5 text-sm text-indigo-600 font-medium print-hide">🖨️ 列印 / PDF</button>
+          </div>
+        </div>
+        <div id="printArea">${slips}</div>
+      </div>`;
+  }
+
+  return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-xl shadow-sm border p-4 space-y-4 print-hide">
+        <div><label class="text-sm font-medium text-slate-600 block mb-1.5">選擇校隊</label><div class="flex flex-wrap gap-2">${teamBtns}</div></div>
+        <div>
+          <label class="text-sm font-medium text-slate-600 block mb-1.5">訊息內容</label>
+          <div class="flex flex-wrap gap-1.5 mb-2">
+            <span class="text-xs text-slate-400 self-center">點擊插入代入符號：</span>
+            <button onclick="slipInsert('{班別}')" class="text-xs px-2 py-1 rounded-md bg-indigo-100 text-indigo-700 font-medium">{班別}</button>
+            <button onclick="slipInsert('{學號}')" class="text-xs px-2 py-1 rounded-md bg-indigo-100 text-indigo-700 font-medium">{學號}</button>
+            <button onclick="slipInsert('{姓名}')" class="text-xs px-2 py-1 rounded-md bg-indigo-100 text-indigo-700 font-medium">{姓名}</button>
+          </div>
+          <textarea id="slip_msg" oninput="state.slipMsg=this.value" rows="4" placeholder="例：{班別}{姓名}，今日放學有 4:10 合唱團，請到音樂室進行練習。" class="w-full p-3 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-indigo-400 resize-none">${esc(s.slipMsg)}</textarea>
+          <p class="text-xs text-slate-400 mt-1">系統會把 {班別}、{學號}、{姓名} 自動換成每位同學嘅資料，逐張生成。可用換行輸入第二行提示。</p>
+        </div>
+        <button onclick="slipGenerate()" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-medium flex items-center justify-center gap-1.5">📋 生成提示紙</button>
+      </div>
+      ${preview}
+    </div>`;
+}
+function slipSetTeam(id){
+  const ta=document.getElementById('slip_msg'); if(ta) state.slipMsg=ta.value;
+  state.slipTeam=id; render();
+}
+function slipInsert(text){
+  const ta=document.getElementById('slip_msg'); if(!ta) return;
+  const start=ta.selectionStart, end=ta.selectionEnd, v=ta.value;
+  ta.value=v.slice(0,start)+text+v.slice(end);
+  state.slipMsg=ta.value;
+  ta.focus();
+  const pos=start+text.length; ta.setSelectionRange(pos,pos);
+}
+function slipGenerate(){
+  const ta=document.getElementById('slip_msg'); if(ta) state.slipMsg=ta.value;
+  if(!state.slipMsg.trim()){ showToast('請輸入訊息內容'); return; }
+  state.slipGenerated={ team:state.slipTeam, msg:state.slipMsg, list:sortStudents(state.students.filter(x=>x.teams.includes(state.slipTeam))) };
+  render();
+}
+function slipExport(){
+  const g=state.slipGenerated;
+  if(!g){ showToast('請先生成提示紙'); return; }
+  if(g.list.length===0){ showToast('此校隊沒有同學'); return; }
+  const html = `<p style="text-align:center;font-size:16px;font-weight:bold;margin:0 0 10px;">${teamName(g.team)} 提示紙</p>` + slipTableHTML(g);
+  exportWord(html, `${teamName(g.team)}_提示紙.doc`);
+  showToast('已匯出 Word 檔');
+}
+
+/* ==================== Modal ==================== */
+function openModal(title, bodyHTML){
+  document.getElementById('modalRoot').innerHTML=`
+    <div class="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4" onclick="if(event.target===this)closeModal()">
+      <div class="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-screen overflow-y-auto">
+        <div class="flex items-center justify-between px-4 py-3 border-b sticky top-0 bg-white"><h3 class="font-semibold">${esc(title)}</h3><button onclick="closeModal()" class="text-slate-400 text-xl leading-none">✕</button></div>
+        <div id="modalBody" class="p-4">${bodyHTML}</div>
+      </div>
+    </div>`;
+}
+function closeModal(){ document.getElementById('modalRoot').innerHTML=''; }
+
+/* ==================== 啟動 ==================== */
+loadData();
+render();
+</script>
+</body>
+</html>
